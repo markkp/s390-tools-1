@@ -4,7 +4,8 @@
 # mkdump.pl - Preparing disks for use as S/390 dump device
 #
 # Copyright (c) 2011 Tim Hardeck, SUSE LINUX Products GmbH
-# bases on mkdump.sh (c) 2004 Hannes Reinecke, SuSE AG
+# Copyright (c) 2017 SUSE LINUX GmbH, Nuernberg, Germany.
+# Based on mkdump.sh (c) 2004 Hannes Reinecke, SuSE AG
 #
 # License:
 #
@@ -30,7 +31,7 @@ use warnings;
 use Fcntl;
 use Getopt::Long;
 
-my $VERSION = "2.0.2";
+my $VERSION = "2.0.3";
 
 my $BLKID = "/sbin/blkid";
 my $PARTED = "/usr/sbin/parted";
@@ -41,7 +42,6 @@ my $ZIPL = "/sbin/zipl";
 my $UDEVADM = "/sbin/udevadm";
 my $ZGETDUMP = "/sbin/zgetdump";
 
-my $MNTPOINT = "/var/run/mkdump." . getppid();
 # temporary DASD device configuration file for Zipl
 my $MDPATH = "/tmp/mvdump.conf";
 # zFCP dump dir, without a leading '/'
@@ -56,11 +56,6 @@ sub cleanup
 	# DASD
 	if (-e $MDPATH) {
 		system("rm -f $MDPATH");
-	}
-	# zFCP
-	if (-d $MNTPOINT) {
-		system("umount $MNTPOINT");
-		system("rmdir $MNTPOINT");
 	}
 }
 
@@ -230,15 +225,13 @@ sub print_device
 		$output .= "\t$adapter\t$wwpn\t$lun";
 
 		# check for dump record
-		system("mkdir -p $MNTPOINT");
-		if (get_partition_num($device) == 1 and system("mount -o ro ${device}1 $MNTPOINT 2>/dev/null") == 0) {
-			if ( -r "$MNTPOINT/bootmap" and -d "$MNTPOINT/$ZFCP_DUMP_DIR") {
-				$dump_device = 1;
-				$output .= "\tdumpdevice";
-			}
-			system("umount $MNTPOINT");
+		my $zgetdump = `$ZGETDUMP -d $device 2>&1`;
+		if ($? == 0) {
+			my ($dsize) = ($zgetdump =~ /Maximum dump size\.:\s+([0-9]+) MB/m);
+			$dsize = $size unless (defined($dsize));
+			$output = "$device\t${dsize}MB\t$adapter\t$wwpn\t$lun\tdumpdevice";
+			$dump_device = 1;
 		}
-		system("rmdir $MNTPOINT");
 	}
 	if ($only_dump_disks) {
 		if ($dump_device) {
@@ -310,6 +303,8 @@ sub determine_free_disks
 				push(@zfcp, $device);
 			}
 		}
+		# wait for udev to process all events triggered by sysopen(,O_EXCL)
+		system("$UDEVADM settle");
 	}
 
 	return(\@dasd, \@zfcp);
@@ -324,7 +319,7 @@ sub prepare_dasd
 	# check formatting
 	for my $device (@devices) {
 		# determine  disk layout
-		my ($fmtstr) = `$DASDVIEW -x -f $device`  =~ /(\w\w\w) formatted/;
+		my ($fmtstr) = `$DASDVIEW -x $device`  =~ /(\w\w\w) formatted/;
 		
 		SWITCH:
 		for($fmtstr) {
